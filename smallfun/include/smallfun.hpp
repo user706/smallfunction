@@ -2,6 +2,8 @@
 #define SMALLFUNCTION_SMALLFUNCTION_HPP
 
 #include <type_traits>
+#include <utility>
+#include <cstddef>
 
 namespace smallfun {
 
@@ -9,7 +11,6 @@ namespace smallfun {
 template<class ReturnType, class...Xs>
 struct SFConcept {
   virtual ReturnType operator()(Xs...)const = 0;
-  virtual ReturnType operator()(Xs...) = 0;
   virtual void copy(void*)const = 0;
   virtual ~SFConcept() {};
 };
@@ -17,59 +18,71 @@ struct SFConcept {
 template<class F, class ReturnType, class...Xs>
 struct SFModel final
   : SFConcept<ReturnType, Xs...> {
-  F f;
+  mutable F f;
 
   SFModel(F const& f)
     : f(f)
   {}
 
-  virtual void copy(void* memory)const {
-    new (memory) SFModel<F, ReturnType, Xs...>(f);
+  void copy(void* memory)       const override final {
+    new (memory) SFModel(f);
   }
 
-  virtual ReturnType operator()(Xs...xs)const {
+  ReturnType operator()(Xs...xs)const override final {
     return f(xs...);
   }
 
-  virtual ReturnType operator()(Xs...xs) {
-    return f(xs...);
-  }
-
-  virtual ~SFModel() {}
 };
 
 
 
-template<class Signature, unsigned size=128>
+template<class Signature, std::size_t size=128>
 struct SmallFun;
 
-template<class ReturnType, class...Xs, unsigned size>
+template<class ReturnType, class...Xs, std::size_t size>
 class SmallFun<ReturnType(Xs...), size> {
-  char memory[size];
+  static constexpr std::size_t alignment = alignof(std::max_align_t);
+  alignas(alignment) char memory[size];
 
-  bool allocated = 0;
-  using concept = SFConcept<ReturnType, Xs...>;
+  bool allocated = false;
+  using Concept = SFConcept<ReturnType, Xs...>;
 public:
   SmallFun(){}
 
-  template<class F,
-    std::enable_if_t<(sizeof(SFModel<F, ReturnType, Xs...>)<=size), bool> = 0 >
+  template<class F>
   SmallFun(F const&f)
-    : allocated(sizeof(SFModel<F, ReturnType, Xs...>)) {
-    new (memory) SFModel<F, ReturnType, Xs...>(f);
+    : allocated(true) {
+      using Model = SFModel<F, ReturnType, Xs...>;
+      static_assert(sizeof(Model) <= size, "");
+      new (memory) Model(f);
   }
 
-  template<unsigned s,
-    std::enable_if_t<(s <= size), bool> = 0>
+  template<class F>
+  SmallFun& operator=(F const&f) {
+    using Model = SFModel<F, ReturnType, Xs...>;
+    static_assert(sizeof(Model) <= size, "");
+    clean();
+    allocated = true;
+    new (memory) Model(f);
+    return *this;
+  }
+
+
+  // copy constructor
+
+  template<std::size_t s>
   SmallFun(SmallFun<ReturnType(Xs...), s> const& sf)
     : allocated(sf.allocated) {
+    static_assert(s <= size, "");
     sf.copy(memory);
   }
 
 
-  template<unsigned s,
-    std::enable_if_t<(s <= size), bool> = 0>
+  // copy assign
+
+  template<std::size_t s>
   SmallFun& operator=(SmallFun<ReturnType(Xs...), s> const& sf) {
+    static_assert(s <= size, "");
     clean();
     allocated = sf.allocated;
     sf.copy(memory);
@@ -78,30 +91,35 @@ public:
 
   void clean() {
     if (allocated) {
-      ((concept*)memory)->~concept();
+      Concept *cpt = reinterpret_cast<Concept*>(memory);
+      cpt->~Concept();
       allocated = 0;
     }
   }
 
   ~SmallFun() {
     if (allocated) {
-      ((concept*)memory)->~concept();
+      Concept *cpt = reinterpret_cast<Concept*>(memory);
+      cpt->~Concept();
     }
   }
 
   template<class...Ys>
   ReturnType operator()(Ys&&...ys) {
-    return (*(concept*)memory)(std::forward<Ys>(ys)...);
+    Concept *cpt = reinterpret_cast<Concept*>(memory);
+    return (*cpt)(std::forward<Ys>(ys)...);
   }
 
   template<class...Ys>
   ReturnType operator()(Ys&&...ys)const {
-    return (*(concept*)memory)(std::forward<Ys>(ys)...);
+    Concept *cpt = reinterpret_cast<Concept*>(memory);
+    return (*cpt)(std::forward<Ys>(ys)...);
   }
 
   void copy(void* data)const {
     if (allocated) {
-      ((concept*)memory)->copy(data);
+      Concept *cpt = reinterpret_cast<Concept*>(memory);
+      cpt->copy(data);
     }
   }
 };
